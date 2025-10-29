@@ -10,3 +10,6 @@ yarn.lock
 data.json
 
 main.js
+
+# Other
+*.md

@@ -65,6 +65,65 @@ function getYAMLMetadata(markdown: string) {
     return {};
 }
 
+// Preprocesses markdown to convert Obsidian wiki-link image syntax to standard markdown
+// This is needed for markdown export mode, where Pandoc doesn't understand ![[image.png]]
+export async function preprocessMarkdownImages(
+    markdown: string,
+    inputFile: string,
+    plugin: PandocPlugin
+): Promise<string> {
+    const adapter = plugin.app.vault.adapter as FileSystemAdapter;
+    const subfolder = inputFile.substring(adapter.getBasePath().length);
+
+    // Regex to match: ![[filename|width]] or ![[filename|widthxheight]] or ![[filename]]
+    // Groups: 1=filename, 3=width, 5=height
+    const wikiImageRegex = /!\[\[([^\]|]+)(\|(\d+)(x(\d+))?)?\]\]/g;
+
+    let result = markdown;
+    const matches = Array.from(markdown.matchAll(wikiImageRegex));
+
+    for (const match of matches) {
+        const fullMatch = match[0];
+        const filename = match[1].trim();
+        const width = match[3];
+        const height = match[5];
+
+        try {
+            // Resolve wiki-link to actual file path using Obsidian's link resolver
+            const file = plugin.app.metadataCache.getFirstLinkpathDest(filename, subfolder);
+
+            if (!file) {
+                console.warn(`Pandoc plugin: Could not resolve image link: ${filename}`);
+                continue; // Keep original syntax if can't resolve
+            }
+
+            const absolutePath = adapter.getFullPath(file.path);
+
+            // Normalize path separators for cross-platform compatibility
+            const normalizedPath = absolutePath.replace(/\\/g, '/');
+
+            // Build standard markdown with file:// URL for Pandoc
+            let replacement = `![${filename}](file://${normalizedPath})`;
+
+            // Add Pandoc-style size attributes if dimensions were specified
+            if (width || height) {
+                const attrs: string[] = [];
+                if (width) attrs.push(`width=${width}px`);
+                if (height) attrs.push(`height=${height}px`);
+                replacement += `{${attrs.join(' ')}}`;
+            }
+
+            // Replace this occurrence in the result
+            result = result.replace(fullMatch, replacement);
+        } catch (e) {
+            console.error(`Pandoc plugin: Error processing image link ${filename}:`, e);
+            // Keep original if there's an error
+        }
+    }
+
+    return result;
+}
+
 async function getCustomCSS(settings: PandocPluginSettings, vaultBasePath: string): Promise<string> {
     if (!settings.customCSSFile) return;
     let file = settings.customCSSFile;
@@ -231,7 +290,16 @@ async function postProcessRenderedHTML(plugin: PandocPlugin, inputFile: string, 
     if (outputFormat !== 'html') {
         for (let img of Array.from(wrapper.querySelectorAll('img'))) {
             if (img.src.startsWith(prefix) && img.getAttribute('data-touched') !== 'true') {
-                img.src = adapter.getFullPath(img.src.substring(prefix.length));
+                // Decode URI components to handle spaces and special characters
+                const encodedPath = img.src.substring(prefix.length);
+                const decodedPath = decodeURIComponent(encodedPath);
+                const absolutePath = adapter.getFullPath(decodedPath);
+
+                // Use file:// URLs for better Pandoc compatibility across platforms
+                // Normalize path separators for cross-platform support
+                const normalizedPath = absolutePath.replace(/\\/g, '/');
+                img.src = 'file://' + normalizedPath;
+
                 img.setAttribute('data-touched', 'true');
             }
         }

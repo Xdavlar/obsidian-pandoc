@@ -16,7 +16,7 @@ import { pandoc, inputExtensions, outputFormats, OutputFormat, needsLaTeX, needs
 import * as YAML from 'yaml';
 import * as temp from 'temp';
 
-import render from './renderer';
+import render, { preprocessMarkdownImages } from './renderer';
 import PandocPluginSettingTab from './settings';
 import { PandocPluginSettings, DEFAULT_SETTINGS, replaceFileExtension } from './global';
 export default class PandocPlugin extends Plugin {
@@ -131,17 +131,34 @@ export default class PandocPlugin extends Plugin {
                     break;
                 }
                 case 'md': {
-                    const result = await pandoc(
-                        {
-                            file: inputFile, format: 'markdown',
-                            pandoc: this.settings.pandoc, pdflatex: this.settings.pdflatex,
-                            directory: path.dirname(inputFile),
-                        },
-                        { file: outputFile, format },
-                        this.settings.extraArguments.split('\n')
-                    );
-                    error = result.error;
-                    command = result.command;
+                    // Preprocess markdown to convert Obsidian wiki-link images to standard markdown
+                    const originalMarkdown = view.data;
+                    const processedMarkdown = await preprocessMarkdownImages(originalMarkdown, inputFile, this);
+
+                    // Write preprocessed markdown to a temp file for Pandoc
+                    const tempMarkdownFile = temp.path({ suffix: '.md' });
+                    await fs.promises.writeFile(tempMarkdownFile, processedMarkdown);
+
+                    try {
+                        const result = await pandoc(
+                            {
+                                file: tempMarkdownFile, format: 'markdown',
+                                pandoc: this.settings.pandoc, pdflatex: this.settings.pdflatex,
+                                directory: path.dirname(inputFile),
+                            },
+                            { file: outputFile, format },
+                            this.settings.extraArguments.split('\n')
+                        );
+                        error = result.error;
+                        command = result.command;
+                    } finally {
+                        // Clean up temp file
+                        try {
+                            await fs.promises.unlink(tempMarkdownFile);
+                        } catch (e) {
+                            // Ignore cleanup errors
+                        }
+                    }
                     break;
                 }
             }
