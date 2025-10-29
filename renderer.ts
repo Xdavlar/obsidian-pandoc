@@ -296,7 +296,7 @@ async function postProcessRenderedHTML(plugin: PandocPlugin, inputFile: string, 
                     // We've got an infinite recursion on our hands
                     // We should replace the embed with a wikilink
                     // Then our link processing happens afterwards
-                    span.outerHTML = `<a href="${file}">${span.innerHTML}</a>`;
+                    span.outerHTML = `<a href="app://obsidian.md/${file.path}">${span.innerHTML || file.basename}</a>`;
                 } else {
                     const markdown = await adapter.read(file.path);
                     const newParentFiles = [...parentFiles];
@@ -317,21 +317,48 @@ async function postProcessRenderedHTML(plugin: PandocPlugin, inputFile: string, 
         if (!a.href.startsWith(prefix)) continue;
         // This is now an internal link (wikilink)
         if (settings.linkStrippingBehaviour === 'link' || outputFormat === 'html') {
-            let href = path.join(dirname, a.href.substring(prefix.length));
-            if (settings.addExtensionsToInternalLinks.length && a.href.startsWith(prefix)) {
-                if (path.extname(href) === '') {
-                    const dir = path.dirname(href);
+            const linkTarget = decodeURIComponent(a.href.substring(prefix.length));
+
+            // Extract anchor if present (e.g., "note#heading" -> "note" and "#heading")
+            const hashIndex = linkTarget.indexOf('#');
+            const baseLinkTarget = hashIndex !== -1 ? linkTarget.substring(0, hashIndex) : linkTarget;
+            const anchor = hashIndex !== -1 ? linkTarget.substring(hashIndex) : '';
+
+            // Use shared resolution function to find the file
+            const file = resolveFileLink(baseLinkTarget, inputFile, plugin);
+
+            if (file) {
+                // File found - use its actual path
+                let href = adapter.getFullPath(file.path);
+
+                // Add extension if needed
+                if (settings.addExtensionsToInternalLinks.length && path.extname(href) === '') {
+                    href = href + '.' + settings.addExtensionsToInternalLinks;
+                }
+
+                // Add anchor back if it was present
+                if (anchor) {
+                    href = href + anchor;
+                }
+
+                a.href = href;
+                console.log(`Pandoc plugin: Resolved link ${linkTarget} → ${file.path} → ${href}`);
+            } else {
+                // Fallback: couldn't resolve, keep relative path from current directory
+                let href = path.join(dirname, linkTarget);
+                if (settings.addExtensionsToInternalLinks.length && path.extname(href) === '') {
                     const base = path.basename(href);
-                    // Be careful to turn [[note#heading]] into note.extension#heading not note#heading.extension
-                    const hashIndex = base.indexOf('#');
-                    if (hashIndex !== -1) {
-                        href = path.join(dir, base.substring(0, hashIndex) + '.' + settings.addExtensionsToInternalLinks + base.substring(hashIndex));
+                    const dir = path.dirname(href);
+                    const hashIdx = base.indexOf('#');
+                    if (hashIdx !== -1) {
+                        href = path.join(dir, base.substring(0, hashIdx) + '.' + settings.addExtensionsToInternalLinks + base.substring(hashIdx));
                     } else {
                         href = path.join(dir, base + '.' + settings.addExtensionsToInternalLinks);
                     }
                 }
+                a.href = href;
+                console.warn(`Pandoc plugin: Could not resolve link ${linkTarget}, using relative path`);
             }
-            a.href = href;
         } else if (settings.linkStrippingBehaviour === 'strip') {
             a.outerHTML = '';
         } else if (settings.linkStrippingBehaviour === 'text') {
