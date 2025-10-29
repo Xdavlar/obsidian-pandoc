@@ -55,6 +55,57 @@ function fileBaseName(file: string): string {
     return path.basename(file, path.extname(file));
 }
 
+// Resolves a filename to a TFile using Obsidian's link resolver with vault-wide search fallback
+// This mimics Obsidian's "magic" behavior of finding files by name regardless of location
+function resolveFileLink(filename: string, sourcePath: string, plugin: PandocPlugin): any | null {
+    const adapter = plugin.app.vault.adapter as FileSystemAdapter;
+
+    // Get vault-relative path without leading slash
+    let vaultRelativePath = sourcePath.substring(adapter.getBasePath().length);
+    if (vaultRelativePath.startsWith('/') || vaultRelativePath.startsWith('\\')) {
+        vaultRelativePath = vaultRelativePath.substring(1);
+    }
+
+    // Try Obsidian's standard link resolver first
+    let file = plugin.app.metadataCache.getFirstLinkpathDest(filename, vaultRelativePath);
+
+    // If direct resolution fails, search the entire vault for the file
+    if (!file) {
+        console.log(`Pandoc plugin: Direct resolution failed for ${filename}, searching vault...`);
+
+        // Get all files in the vault
+        const allFiles = plugin.app.vault.getFiles();
+
+        // Extract just the filename without path for comparison
+        const targetFilename = filename.split('/').pop().split('\\').pop();
+
+        // Search for a file with matching name
+        file = allFiles.find(f => {
+            const fName = f.name;
+            const fBasename = f.basename; // filename without extension
+            const fPath = f.path;
+
+            // Try exact matches first
+            if (fName === targetFilename) return true;
+            if (fBasename === targetFilename) return true;
+            if (fPath.endsWith(filename)) return true;
+
+            // Try case-insensitive match as fallback
+            if (fName.toLowerCase() === targetFilename.toLowerCase()) return true;
+
+            return false;
+        });
+
+        if (file) {
+            console.log(`Pandoc plugin: Found ${filename} via vault search → ${file.path}`);
+        } else {
+            console.warn(`Pandoc plugin: Could not resolve file link: ${filename} (source: ${vaultRelativePath})`);
+        }
+    }
+
+    return file;
+}
+
 function getYAMLMetadata(markdown: string) {
     markdown = markdown.trim();
     if (markdown.startsWith('---')) {
@@ -73,7 +124,6 @@ export async function preprocessMarkdownImages(
     plugin: PandocPlugin
 ): Promise<string> {
     const adapter = plugin.app.vault.adapter as FileSystemAdapter;
-    const subfolder = inputFile.substring(adapter.getBasePath().length);
 
     // Regex to match: ![[filename|width]] or ![[filename|widthxheight]] or ![[filename]]
     // Groups: 1=filename, 3=width, 5=height
@@ -89,15 +139,15 @@ export async function preprocessMarkdownImages(
         const height = match[5];
 
         try {
-            // Resolve wiki-link to actual file path using Obsidian's link resolver
-            const file = plugin.app.metadataCache.getFirstLinkpathDest(filename, subfolder);
+            // Use shared resolution function
+            const file = resolveFileLink(filename, inputFile, plugin);
 
             if (!file) {
-                console.warn(`Pandoc plugin: Could not resolve image link: ${filename}`);
                 continue; // Keep original syntax if can't resolve
             }
 
             const absolutePath = adapter.getFullPath(file.path);
+            console.log(`Pandoc plugin: Resolved ${filename} → ${file.path} → ${absolutePath}`);
 
             // Normalize path separators for cross-platform compatibility
             const normalizedPath = absolutePath.replace(/\\/g, '/');
@@ -233,8 +283,14 @@ async function postProcessRenderedHTML(plugin: PandocPlugin, inputFile: string, 
     for (let span of Array.from(wrapper.querySelectorAll('span.internal-embed'))) {
         let src = span.getAttribute('src');
         if (src) {
-            const subfolder = inputFile.substring(adapter.getBasePath().length);  // TODO: this is messy
-            const file = plugin.app.metadataCache.getFirstLinkpathDest(src, subfolder);
+            // Use shared resolution function
+            const file = resolveFileLink(src, inputFile, plugin);
+
+            if (!file) {
+                console.warn(`Pandoc plugin: Could not resolve embedded note: ${src}`);
+                continue;
+            }
+
             try {
                 if (parentFiles.indexOf(file.path) !== -1) {
                     // We've got an infinite recursion on our hands
@@ -293,7 +349,20 @@ async function postProcessRenderedHTML(plugin: PandocPlugin, inputFile: string, 
                 // Decode URI components to handle spaces and special characters
                 const encodedPath = img.src.substring(prefix.length);
                 const decodedPath = decodeURIComponent(encodedPath);
-                const absolutePath = adapter.getFullPath(decodedPath);
+
+                // Use shared resolution function to find the file (handles vault-wide search)
+                const file = resolveFileLink(decodedPath, inputFile, plugin);
+
+                let absolutePath: string;
+                if (file) {
+                    // File found via resolution - use its actual path
+                    absolutePath = adapter.getFullPath(file.path);
+                    console.log(`Pandoc plugin: Resolved image ${decodedPath} → ${file.path} → ${absolutePath}`);
+                } else {
+                    // Fallback to assuming the path is correct (for absolute/external paths)
+                    absolutePath = adapter.getFullPath(decodedPath);
+                    console.warn(`Pandoc plugin: Could not resolve image ${decodedPath}, using path as-is`);
+                }
 
                 // Use file:// URLs for better Pandoc compatibility across platforms
                 // Normalize path separators for cross-platform support
